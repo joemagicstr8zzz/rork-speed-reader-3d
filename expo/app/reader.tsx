@@ -33,6 +33,7 @@ export default function ReaderScreen() {
   const [showControls, setShowControls] = useState<boolean>(true);
   const [isDraggingProgress, setIsDraggingProgress] = useState<boolean>(false);
   const [dragChunkIndex, setDragChunkIndex] = useState<number>(0);
+  const [readerAreaWidth, setReaderAreaWidth] = useState<number>(0);
 
   const chunks = useMemo(() => {
     if (!document || !document.isReadable) {
@@ -484,12 +485,38 @@ export default function ReaderScreen() {
           </View>
         )}
 
-        <View style={[styles.readerArea, isLandscape && { paddingHorizontal: 16 }]}>
+        <View
+          style={[styles.readerArea, isLandscape && { paddingHorizontal: 16 }]}
+          onLayout={(e) => setReaderAreaWidth(e.nativeEvent.layout.width)}
+        >
           {(() => {
             const ls = wordSpacingToLetterSpacing(settings.threeD.wordSpacing, settings.fontSize * scaleFactor);
             const displayFontSize = settings.fontSize * scaleFactor;
             const fontFamily = getFontFamily(settings.fontFamily);
             const depthPx = (settings.threeD.depth / 2) * scaleFactor;
+
+            // Calculate the max font size that fits the longest word in each stereo half.
+            // A character is roughly fontSize * 0.55 pixels wide; letter-spacing adds extra width.
+            const longestWord = currentChunk.words.reduce((a, b) => (b.length > a.length ? b : a), '');
+            const availableWidth = readerAreaWidth > 0 ? readerAreaWidth : width - 48;
+            const halfWidth = availableWidth / 2 - depthPx - 4;
+            const charWidthApprox = (size: number) => size * 0.55 + ls;
+            let fitFontSize = displayFontSize;
+            // Binary search for largest font size where longest word fits
+            if (longestWord.length > 0 && halfWidth > 0) {
+              let lo = displayFontSize * 0.35;
+              let hi = displayFontSize;
+              for (let i = 0; i < 10; i++) {
+                const mid = (lo + hi) / 2;
+                if (longestWord.length * charWidthApprox(mid) <= halfWidth) {
+                  lo = mid;
+                } else {
+                  hi = mid;
+                }
+              }
+              fitFontSize = lo;
+            }
+            const stereoFontSize = Math.max(displayFontSize * 0.35, Math.min(displayFontSize, fitFontSize));
 
             if (mode === '2D') {
               const orpWordIdx = Math.floor(currentChunk.words.length / 2);
@@ -513,7 +540,7 @@ export default function ReaderScreen() {
                     <Text
                       style={[
                         styles.textDisplay,
-                        { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
+                        { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls, maxWidth: width * 0.8 },
                       ]}
                       numberOfLines={1}
                       adjustsFontSizeToFit={true}
@@ -552,8 +579,8 @@ export default function ReaderScreen() {
               );
             }
 
-            // 3D Mode: two halves, text centered within each half
-            // Auto-fit: long words shrink to fit within each half instead of truncating
+            // 3D Mode: two halves, text centered within each half.
+            // Font size is pre-calculated so the longest word always fits without truncation.
             return (
               <View style={styles.stereoContainer}>
                 <View style={[styles.stereoHalf, { paddingRight: depthPx }]}>
@@ -561,11 +588,9 @@ export default function ReaderScreen() {
                     style={[
                       styles.textDisplay,
                       styles.stereoHalfText,
-                      { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls, opacity: settings.threeD.ghostAlpha },
+                      { color: bgStyle.textColor, fontSize: stereoFontSize, fontFamily, letterSpacing: ls, opacity: settings.threeD.ghostAlpha },
                     ]}
                     numberOfLines={1}
-                    adjustsFontSizeToFit={true}
-                    minimumFontScale={0.35}
                   >
                     {currentChunk.words.join(' ')}
                   </Text>
@@ -575,11 +600,9 @@ export default function ReaderScreen() {
                     style={[
                       styles.textDisplay,
                       styles.stereoHalfText,
-                      { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
+                      { color: bgStyle.textColor, fontSize: stereoFontSize, fontFamily, letterSpacing: ls },
                     ]}
                     numberOfLines={1}
-                    adjustsFontSizeToFit={true}
-                    minimumFontScale={0.35}
                   >
                     {currentChunk.words.join(' ')}
                   </Text>
@@ -874,6 +897,7 @@ const styles = StyleSheet.create({
   },
   stereoHalfText: {
     textAlign: 'center',
+    width: '100%',
   },
   textDisplay: {
     textAlign: 'center',
