@@ -549,15 +549,14 @@ export default function ReaderScreen() {
               );
             }
 
-            // 3D Mode: absolute-positioned overlays, each eye spans full width,
-            // text centered within each eye, offset via opposite-side padding
+            // 3D Mode: two halves, text centered within each half
             return (
               <View style={styles.stereoContainer}>
-                {/* Ghost (left) eye — text centered, shifted right via left padding */}
-                <View style={[styles.stereoEyeOverlay, { paddingLeft: depthPx }]}>
+                <View style={[styles.stereoHalf, { paddingRight: depthPx }]}>
                   <Text
                     style={[
                       styles.textDisplay,
+                      styles.stereoHalfText,
                       { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls, opacity: settings.threeD.ghostAlpha },
                     ]}
                     numberOfLines={1}
@@ -566,11 +565,11 @@ export default function ReaderScreen() {
                     {currentChunk.words.join(' ')}
                   </Text>
                 </View>
-                {/* Dominant (right) eye — text centered, shifted left via right padding */}
-                <View style={[styles.stereoEyeOverlay, { paddingRight: depthPx }]}>
+                <View style={[styles.stereoHalf, { paddingLeft: depthPx }]}>
                   <Text
                     style={[
                       styles.textDisplay,
+                      styles.stereoHalfText,
                       { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
                     ]}
                     numberOfLines={1}
@@ -856,18 +855,19 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(94, 234, 212, 0.08)',
   },
   stereoContainer: {
-    position: 'relative',
+    flexDirection: 'row',
     width: '100%',
     minHeight: 120,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stereoEyeOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
+  stereoHalf: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  stereoHalfText: {
+    textAlign: 'center',
   },
   textDisplay: {
     textAlign: 'center',
