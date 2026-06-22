@@ -8,7 +8,7 @@ import { appTheme } from '@/constants/colors';
 import { useDocuments } from '@/contexts/DocumentContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { ReadingMode } from '@/types/document';
-import { createChunks, getBackgroundStyle, getFontFamily, getContrastColor } from '@/utils/rsvpEngine';
+import { createChunks, getBackgroundStyle, getFontFamily, getContrastColor, wordSpacingToLetterSpacing } from '@/utils/rsvpEngine';
 import { getBackgroundComponent } from '@/utils/backgroundRenderer';
 import { meetsContrastThreshold } from '@/utils/colorUtils';
 
@@ -485,81 +485,103 @@ export default function ReaderScreen() {
         )}
 
         <View style={[styles.readerArea, isLandscape && { paddingHorizontal: 16 }]}>
-          {mode === '2D' ? (
-            <View style={styles.textContainer}>
-              <View style={styles.focusHalo} />
-              <Text
-                style={[
-                  styles.textDisplay,
-                  {
-                    color: bgStyle.textColor,
-                    fontSize: settings.fontSize * scaleFactor,
-                    fontFamily: getFontFamily(settings.fontFamily),
-                  }
-                ]}
-              >
-                {currentChunk.words.map((word, index) => {
-                  const isORP = index === Math.floor(currentChunk.words.length / 2) && currentChunk.orpIndex < word.length;
+          {(() => {
+            const ls = wordSpacingToLetterSpacing(settings.threeD.wordSpacing, settings.fontSize * scaleFactor);
+            const displayFontSize = settings.fontSize * scaleFactor;
+            const fontFamily = getFontFamily(settings.fontFamily);
+            const depthPx = (settings.threeD.depth / 2) * scaleFactor;
 
-                  if (isORP) {
-                    const orpPos = currentChunk.orpIndex;
-                    return (
-                      <Text key={index}>
-                        {word.substring(0, orpPos)}
-                        <Text style={styles.orpHighlight}>{word[orpPos]}</Text>
-                        {word.substring(orpPos + 1)}
-                        {index < currentChunk.words.length - 1 ? ' ' : ''}
-                      </Text>
-                    );
-                  }
+            if (mode === '2D') {
+              const orpWordIdx = Math.floor(currentChunk.words.length / 2);
+              const orpWord = currentChunk.words[orpWordIdx] || '';
+              const orpPos = currentChunk.orpIndex;
+              const orpInBounds = orpPos < orpWord.length;
 
-                  return <Text key={index}>{word}{index < currentChunk.words.length - 1 ? ' ' : ''}</Text>;
-                })}
-              </Text>
-            </View>
-          ) : (
-            <View style={styles.stereoContainer}>
-              <View style={[styles.stereoEye, { marginRight: (settings.threeD.depth / 2) * scaleFactor }]}>
-                <Text
-                  style={[
-                    styles.textDisplay,
-                    {
-                      color: bgStyle.textColor,
-                      fontSize: settings.fontSize * scaleFactor,
-                      fontFamily: getFontFamily(settings.fontFamily),
-                      opacity: settings.threeD.ghostAlpha,
-                    }
-                  ]}
-                >
-                  {currentChunk.words.map((word, idx) => (
-                    <Text key={idx}>
-                      {word}
-                      {idx < currentChunk.words.length - 1 ? ' '.repeat(Math.floor(settings.threeD.wordSpacing / 2) + 1) : ''}
+              return (
+                <View style={styles.textContainer}>
+                  <View style={styles.focusHalo} />
+                  <View style={styles.textRow}>
+                    <Text
+                      style={[
+                        styles.contextWordLeft,
+                        { color: bgStyle.textColor, fontSize: displayFontSize * 0.5, fontFamily, letterSpacing: ls },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {(currentChunk.words[0] ?? '').substring(0, Math.floor((currentChunk.words[0] ?? '').length / 3))}
                     </Text>
-                  ))}
-                </Text>
-              </View>
-              <View style={[styles.stereoEye, { marginLeft: (settings.threeD.depth / 2) * scaleFactor }]}>
-                <Text
-                  style={[
-                    styles.textDisplay,
-                    {
-                      color: bgStyle.textColor,
-                      fontSize: settings.fontSize * scaleFactor,
-                      fontFamily: getFontFamily(settings.fontFamily),
-                    }
-                  ]}
-                >
-                  {currentChunk.words.map((word, idx) => (
-                    <Text key={idx}>
-                      {word}
-                      {idx < currentChunk.words.length - 1 ? ' '.repeat(Math.floor(settings.threeD.wordSpacing / 2) + 1) : ''}
+                    <Text
+                      style={[
+                        styles.textDisplay,
+                        { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
+                      ]}
+                    >
+                      {currentChunk.words.map((word, index) => {
+                        const isORP = index === orpWordIdx && orpInBounds;
+
+                        if (isORP) {
+                          return (
+                            <Text key={index}>
+                              <Text style={[styles.orpPre, { color: bgStyle.textColor, opacity: 0.55 }]}>{word.substring(0, orpPos)}</Text>
+                              <Text style={styles.orpHighlight}>{word[orpPos]}</Text>
+                              <Text style={[styles.orpPost, { color: bgStyle.textColor, opacity: 0.65 }]}>{word.substring(orpPos + 1)}</Text>
+                              {index < currentChunk.words.length - 1 ? ' ' : ''}
+                            </Text>
+                          );
+                        }
+
+                        return <Text key={index}>{word}{index < currentChunk.words.length - 1 ? ' ' : ''}</Text>;
+                      })}
                     </Text>
-                  ))}
-                </Text>
+                    <Text
+                      style={[
+                        styles.contextWordRight,
+                        { color: bgStyle.textColor, fontSize: displayFontSize * 0.5, fontFamily, letterSpacing: ls },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {(currentChunk.words[currentChunk.words.length - 1] ?? '').substring(
+                        Math.floor((currentChunk.words[currentChunk.words.length - 1] ?? '').length * 0.6)
+                      )}
+                    </Text>
+                  </View>
+                </View>
+              );
+            }
+
+            // 3D Mode: absolute-positioned overlays, each eye spans full width,
+            // text centered within each eye, offset via opposite-side padding
+            return (
+              <View style={styles.stereoContainer}>
+                {/* Ghost (left) eye — text centered, shifted right via left padding */}
+                <View style={[styles.stereoEyeOverlay, { paddingLeft: depthPx }]}>
+                  <Text
+                    style={[
+                      styles.textDisplay,
+                      { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls, opacity: settings.threeD.ghostAlpha },
+                    ]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit={false}
+                  >
+                    {currentChunk.words.join(' ')}
+                  </Text>
+                </View>
+                {/* Dominant (right) eye — text centered, shifted left via right padding */}
+                <View style={[styles.stereoEyeOverlay, { paddingRight: depthPx }]}>
+                  <Text
+                    style={[
+                      styles.textDisplay,
+                      { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
+                    ]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit={false}
+                  >
+                    {currentChunk.words.join(' ')}
+                  </Text>
+                </View>
               </View>
-            </View>
-          )}
+            );
+          })()}
 
           {!showControls && isPlaying && (
             <View style={styles.minimalPlayIndicator}>
@@ -806,6 +828,24 @@ const styles = StyleSheet.create({
     minWidth: 220,
     minHeight: 160,
   },
+  textRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  contextWordLeft: {
+    opacity: 0.22,
+    fontWeight: '400' as const,
+    maxWidth: 60,
+    textAlign: 'right',
+  },
+  contextWordRight: {
+    opacity: 0.22,
+    fontWeight: '400' as const,
+    maxWidth: 60,
+    textAlign: 'left',
+  },
   focusHalo: {
     position: 'absolute',
     width: 240,
@@ -816,22 +856,37 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(94, 234, 212, 0.08)',
   },
   stereoContainer: {
-    flexDirection: 'row',
+    position: 'relative',
+    width: '100%',
+    minHeight: 120,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stereoEye: {
+  stereoEyeOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
     alignItems: 'center',
     justifyContent: 'center',
   },
   textDisplay: {
     textAlign: 'center',
     fontWeight: '600' as const,
-    letterSpacing: 0.3,
+    includeFontPadding: false,
+  },
+  orpPre: {
+    fontWeight: '400' as const,
   },
   orpHighlight: {
     fontWeight: '800' as const,
-    textDecorationLine: 'underline',
+    color: '#5EEAD4',
+    backgroundColor: 'rgba(94, 234, 212, 0.12)',
+    borderRadius: 3,
+    overflow: 'visible',
+    paddingHorizontal: 1,
+  },
+  orpPost: {
+    fontWeight: '400' as const,
   },
   minimalPlayIndicator: {
     position: 'absolute',
