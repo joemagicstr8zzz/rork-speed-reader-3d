@@ -515,6 +515,9 @@ export default function ReaderScreen() {
                         styles.textDisplay,
                         { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
                       ]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit={true}
+                      minimumFontScale={0.4}
                     >
                       {currentChunk.words.map((word, index) => {
                         const isORP = index === orpWordIdx && orpInBounds;
@@ -550,6 +553,7 @@ export default function ReaderScreen() {
             }
 
             // 3D Mode: two halves, text centered within each half
+            // Auto-fit: long words shrink to fit within each half instead of truncating
             return (
               <View style={styles.stereoContainer}>
                 <View style={[styles.stereoHalf, { paddingRight: depthPx }]}>
@@ -560,7 +564,8 @@ export default function ReaderScreen() {
                       { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls, opacity: settings.threeD.ghostAlpha },
                     ]}
                     numberOfLines={1}
-                    adjustsFontSizeToFit={false}
+                    adjustsFontSizeToFit={true}
+                    minimumFontScale={0.35}
                   >
                     {currentChunk.words.join(' ')}
                   </Text>
@@ -573,7 +578,8 @@ export default function ReaderScreen() {
                       { color: bgStyle.textColor, fontSize: displayFontSize, fontFamily, letterSpacing: ls },
                     ]}
                     numberOfLines={1}
-                    adjustsFontSizeToFit={false}
+                    adjustsFontSizeToFit={true}
+                    minimumFontScale={0.35}
                   >
                     {currentChunk.words.join(' ')}
                   </Text>
