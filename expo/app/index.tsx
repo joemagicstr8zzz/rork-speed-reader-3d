@@ -1,7 +1,7 @@
 import { useRouter, Href } from 'expo-router';
-import { Book, Clock3, FileText, Gauge, Paperclip, Plus, PlusCircle, Settings, Sparkles, Trash2, X } from 'lucide-react-native';
+import { Book, Bookmark, Clock3, FileText, Gauge, Paperclip, Plus, PlusCircle, Search, Settings, Sparkles, Trash2, X } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Easing, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, Easing, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
@@ -27,15 +27,44 @@ type ImportResult = {
 export default function LibraryScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { documents, isLoading, addDocument, deleteDocument } = useDocuments();
+  const { documents, isLoading, addDocument, deleteDocument, refreshDocuments } = useDocuments();
   const { settings } = useSettings();
 
   const [isAttachmentsVisible, setIsAttachmentsVisible] = useState<boolean>(false);
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [importingFileName, setImportingFileName] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [sortBy, setSortBy] = useState<'recent' | 'alpha' | 'progress'>('recent');
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   const readableDocuments = useMemo<Document[]>(() => documents.filter((doc) => doc.isReadable), [documents]);
   const totalWords = useMemo<number>(() => readableDocuments.reduce((sum, doc) => sum + doc.wordCount, 0), [readableDocuments]);
+
+  const sortedAndFilteredDocuments = useMemo<Document[]>(() => {
+    let filtered = documents.filter((doc) => {
+      if (!searchQuery.trim()) return true;
+      return doc.title.toLowerCase().includes(searchQuery.toLowerCase());
+    });
+
+    switch (sortBy) {
+      case 'alpha':
+        filtered.sort((a, b) => a.title.localeCompare(b.title));
+        break;
+      case 'progress':
+        filtered.sort((a, b) => {
+          const pA = a.wordCount > 0 ? a.progress.chunkIndex / a.wordCount : 0;
+          const pB = b.wordCount > 0 ? b.progress.chunkIndex / b.wordCount : 0;
+          return pB - pA;
+        });
+        break;
+      case 'recent':
+      default:
+        filtered.sort((a, b) => b.updatedAt - a.updatedAt);
+        break;
+    }
+    return filtered;
+  }, [documents, searchQuery, sortBy]);
+
   const nextDocument = useMemo<Document | null>(() => {
     const candidates = readableDocuments
       .filter((doc) => doc.progress.chunkIndex < doc.wordCount)
@@ -328,20 +357,75 @@ export default function LibraryScreen() {
     );
   }, [deleteDocument]);
 
-  const handleOpenDocument = useCallback((doc: Document) => {
+  const handleOpenDocument = useCallback((doc: Document, chunkIndex?: number) => {
     triggerLightFeedback();
-    console.log('[LibraryScreen] Opening document', doc.id);
+    console.log('[LibraryScreen] Opening document', doc.id, 'at chunk', chunkIndex);
     router.push({
       pathname: '/reader' as Href,
-      params: { documentId: doc.id },
+      params: { documentId: doc.id, ...(chunkIndex !== undefined ? { initialChunkIndex: String(chunkIndex) } : {}) },
     } as never);
   }, [router, triggerLightFeedback]);
 
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshDocuments();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [refreshDocuments]);
+
   if (isLoading) {
     return (
-      <View style={styles.loadingContainer} testID="library-loading">
-        <ActivityIndicator size="large" color="#007AFF" />
-      </View>
+      <LinearGradient
+        colors={[appTheme.colors.ink, '#0B1220', '#111827']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.container, { paddingTop: insets.top }]}
+      >
+        <View style={styles.auraOne} />
+        <View style={styles.auraTwo} />
+        <View style={styles.header}>
+          <View style={styles.headerTitleContainer}>
+            <View style={styles.logoMark}>
+              <Book size={22} color="#06111F" strokeWidth={2.7} />
+            </View>
+            <View>
+              <Text style={styles.headerKicker}>FluxRead 3D</Text>
+              <Text style={styles.headerTitle}>Reading cockpit</Text>
+            </View>
+          </View>
+          <View style={styles.headerActions}>
+            <View style={styles.skeletonButton} />
+            <View style={styles.skeletonButton} />
+          </View>
+        </View>
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+          <View style={styles.skeletonHero} />
+          <View style={styles.skeletonContinue} />
+          <View style={styles.documentGrid}>
+            <View style={styles.sectionHeadingRow}>
+              <Text style={styles.sectionHeading}>Library</Text>
+              <Text style={styles.sectionCount}>{documents.length} total</Text>
+            </View>
+            {[1, 2, 3].map((i) => (
+              <View key={`skel-${i}`} style={styles.skeletonCard}>
+                <View style={styles.skeletonRow}>
+                  <View style={styles.skeletonIcon} />
+                  <View style={[styles.skeletonPill, { width: 40 }]} />
+                </View>
+                <View style={[styles.skeletonLine, { width: '75%' }]} />
+                <View style={styles.skeletonRow}>
+                  <View style={[styles.skeletonLineSmall, { flex: 1 }]} />
+                  <View style={[styles.skeletonLineSmall, { flex: 1 }]} />
+                  <View style={[styles.skeletonLineSmall, { flex: 1 }]} />
+                </View>
+                <View style={styles.skeletonBar} />
+              </View>
+            ))}
+          </View>
+        </ScrollView>
+      </LinearGradient>
     );
   }
 
@@ -412,11 +496,20 @@ export default function LibraryScreen() {
           </View>
         </View>
 
-        <ScrollView
-          style={styles.scrollView}
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-        >
+          <ScrollView
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={() => { void handleRefresh(); }}
+                tintColor={appTheme.colors.cyan}
+                colors={[appTheme.colors.cyan]}
+                progressViewOffset={insets.top + 80}
+              />
+            }
+          >
           <LinearGradient
             colors={['rgba(94, 234, 212, 0.18)', 'rgba(84, 168, 255, 0.16)', 'rgba(255, 255, 255, 0.04)']}
             start={{ x: 0, y: 0 }}
@@ -477,7 +570,17 @@ export default function LibraryScreen() {
             </Pressable>
           ) : null}
 
-          {documents.length === 0 ? (
+          {sortedAndFilteredDocuments.length === 0 && searchQuery ? (
+            <View style={styles.emptyState} testID="library-empty-search">
+              <Search size={40} color={appTheme.colors.muted} strokeWidth={1.5} />
+              <Text style={styles.emptyTitle}>No matches</Text>
+              <Text style={styles.emptyText}>
+                No documents match "{searchQuery}". Try a different search term.
+              </Text>
+            </View>
+          ) : sortedAndFilteredDocuments.length === 0 && !searchQuery && documents.length > 0 ? (
+            null
+          ) : documents.length === 0 ? (
             <View style={styles.emptyState} testID="library-empty-state">
               <View style={styles.emptyIconShell}>
                 <FileText size={46} color={appTheme.colors.cyan} strokeWidth={1.7} />
@@ -500,7 +603,42 @@ export default function LibraryScreen() {
                 <Text style={styles.sectionHeading}>Library</Text>
                 <Text style={styles.sectionCount}>{documents.length} total</Text>
               </View>
-              {documents.map((doc) => {
+              <View style={styles.libraryToolbar}>
+                <View style={styles.searchBar}>
+                  <Search size={16} color={appTheme.colors.muted} />
+                  <TextInput
+                    style={styles.searchInput}
+                    placeholder="Search documents..."
+                    placeholderTextColor={appTheme.colors.subtle}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    returnKeyType="search"
+                    autoCorrect={false}
+                  />
+                  {searchQuery.length > 0 && (
+                    <Pressable onPress={() => setSearchQuery('')} style={styles.searchClear}>
+                      <X size={14} color={appTheme.colors.muted} />
+                    </Pressable>
+                  )}
+                </View>
+                <View style={styles.sortPicker}>
+                  {(['recent', 'alpha', 'progress'] as const).map((opt) => (
+                    <Pressable
+                      key={opt}
+                      onPress={() => setSortBy(opt)}
+                      style={[styles.sortChip, sortBy === opt && styles.sortChipActive]}
+                    >
+                      <Text style={[styles.sortChipText, sortBy === opt && styles.sortChipTextActive]}>
+                        {opt === 'recent' ? 'Recent' : opt === 'alpha' ? 'A–Z' : 'Progress'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+              {searchQuery.length > 0 && (
+                <Text style={styles.filterLabel}>Showing {sortedAndFilteredDocuments.length} of {documents.length}</Text>
+              )}
+              {sortedAndFilteredDocuments.map((doc) => {
                 const progressPercent = getProgressPercent(doc);
                 return (
                   <Pressable
@@ -524,9 +662,16 @@ export default function LibraryScreen() {
                       <View style={styles.fileIconShell}>
                         <FileText size={19} color={appTheme.colors.cyan} strokeWidth={2.2} />
                       </View>
-                      <Text
-                        style={[
-                          styles.formatBadge,
+                      <View style={styles.cardHeaderRight}>
+                        {(doc.progress.bookmarks?.length ?? 0) > 0 && (
+                          <View style={styles.bookmarkCountBadge}>
+                            <Bookmark size={10} color={appTheme.colors.amber} />
+                            <Text style={styles.bookmarkCountText}>{doc.progress.bookmarks!.length}</Text>
+                          </View>
+                        )}
+                        <Text
+                          style={[
+                            styles.formatBadge,
                           doc.format === 'TXT' && styles.formatBadgeTxt,
                           doc.format === 'DOCX' && styles.formatBadgeDocx,
                           doc.format === 'MOBI' && styles.formatBadgeMobi,
@@ -536,6 +681,7 @@ export default function LibraryScreen() {
                       >
                         {doc.format}
                       </Text>
+                      </View>
                     </View>
                     {(() => {
                       const message = !doc.isReadable
@@ -695,8 +841,9 @@ export default function LibraryScreen() {
                       </Text>
                       <Text style={styles.attachmentMeta}>
                         {doc.format}
-                        {' · '}
+                        {' \u00b7 '}
                         {doc.isReadable ? 'Readable' : 'Unreadable'}
+                        {(doc.progress.bookmarks?.length ?? 0) > 0 ? ` \u00b7 ${doc.progress.bookmarks!.length} bookmark${doc.progress.bookmarks!.length === 1 ? '' : 's'}` : ''}
                       </Text>
                       {doc.conversionWarnings && doc.conversionWarnings.length > 0 ? (
                         <Text style={styles.attachmentWarning} numberOfLines={2}>
@@ -707,6 +854,30 @@ export default function LibraryScreen() {
                           {doc.unreadableReason}
                         </Text>
                       ) : null}
+                      {(doc.progress.bookmarks?.length ?? 0) > 0 && (
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentBookmarkRow}>
+                          {doc.progress.bookmarks!.slice(0, 5).map((bkIdx) => (
+                            <Pressable
+                              key={`abk-${doc.id}-${bkIdx}`}
+                              onPress={() => {
+                                triggerLightFeedback();
+                                closeAttachments();
+                                router.push({
+                                  pathname: '/reader' as Href,
+                                  params: { documentId: doc.id, initialChunkIndex: String(bkIdx) },
+                                } as never);
+                              }}
+                              style={styles.attachmentBookmarkChip}
+                            >
+                              <Bookmark size={9} color={appTheme.colors.amber} />
+                              <Text style={styles.attachmentBookmarkChipText}>Chunk {bkIdx + 1}</Text>
+                            </Pressable>
+                          ))}
+                          {doc.progress.bookmarks!.length > 5 && (
+                            <Text style={styles.attachmentBookmarkMore}>+{doc.progress.bookmarks!.length - 5} more</Text>
+                          )}
+                        </ScrollView>
+                      )}
                     </View>
                     <Pressable
                       onPress={() => handleDeleteDocument(doc)}
@@ -1348,6 +1519,32 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#FF9F0A',
   },
+  attachmentBookmarkRow: {
+    marginTop: 6,
+    maxHeight: 28,
+  },
+  attachmentBookmarkChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: 'rgba(248,196,107,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(248,196,107,0.22)',
+    marginRight: 6,
+  },
+  attachmentBookmarkChipText: {
+    fontSize: 10,
+    fontWeight: '700' as const,
+    color: appTheme.colors.amber,
+  },
+  attachmentBookmarkMore: {
+    fontSize: 10,
+    color: appTheme.colors.muted,
+    paddingVertical: 4,
+  },
   attachmentRemoveButton: {
     width: 40,
     height: 40,
@@ -1386,5 +1583,145 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#007AFF',
     marginTop: 4,
+  },
+  skeletonButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  skeletonHero: {
+    height: 190,
+    borderRadius: 32,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  },
+  skeletonContinue: {
+    height: 78,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  },
+  skeletonCard: {
+    backgroundColor: 'rgba(18,24,38,0.82)',
+    borderRadius: 24,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    gap: 13,
+  },
+  skeletonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  skeletonIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  skeletonPill: {
+    height: 20,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  skeletonLine: {
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  skeletonLineSmall: {
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  skeletonBar: {
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  libraryToolbar: {
+    gap: 12,
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    height: 46,
+    borderWidth: 1,
+    borderColor: appTheme.colors.stroke,
+    gap: 10,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600' as const,
+    color: appTheme.colors.text,
+    paddingVertical: 0,
+  },
+  searchClear: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  sortPicker: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  sortChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  sortChipActive: {
+    backgroundColor: 'rgba(94,234,212,0.14)',
+    borderColor: 'rgba(94,234,212,0.32)',
+  },
+  sortChipText: {
+    fontSize: 12,
+    fontWeight: '700' as const,
+    color: appTheme.colors.muted,
+  },
+  sortChipTextActive: {
+    color: appTheme.colors.cyan,
+  },
+  filterLabel: {
+    fontSize: 12,
+    color: appTheme.colors.muted,
+    textAlign: 'center',
+    marginTop: -4,
+  },
+  cardHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bookmarkCountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: 'rgba(248,196,107,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(248,196,107,0.28)',
+  },
+  bookmarkCountText: {
+    fontSize: 11,
+    fontWeight: '700' as const,
+    color: appTheme.colors.amber,
   },
 });

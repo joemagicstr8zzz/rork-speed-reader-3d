@@ -1,7 +1,7 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ArrowLeft, Eye, Glasses, Pause, Play } from 'lucide-react-native';
+import { ArrowLeft, Bookmark, BookmarkCheck, Eye, Glasses, Pause, Play } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { AppState, PanResponder, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { appTheme } from '@/constants/colors';
@@ -11,6 +11,10 @@ import { ReadingMode } from '@/types/document';
 import { createChunks, getBackgroundStyle, getFontFamily, getContrastColor } from '@/utils/rsvpEngine';
 import { getBackgroundComponent } from '@/utils/backgroundRenderer';
 import { meetsContrastThreshold } from '@/utils/colorUtils';
+
+const SWIPE_THRESHOLD = 30;
+const TAP_THRESHOLD = 8;
+const DOUBLE_TAP_DELAY = 350;
 
 export default function ReaderScreen() {
   const router = useRouter();
@@ -27,6 +31,8 @@ export default function ReaderScreen() {
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentChunkIndex, setCurrentChunkIndex] = useState<number>(document?.progress.chunkIndex || 0);
   const [showControls, setShowControls] = useState<boolean>(true);
+  const [isDraggingProgress, setIsDraggingProgress] = useState<boolean>(false);
+  const [dragChunkIndex, setDragChunkIndex] = useState<number>(0);
 
   const chunks = useMemo(() => {
     if (!document || !document.isReadable) {
@@ -40,16 +46,21 @@ export default function ReaderScreen() {
   const pausedIndexRef = useRef<number>(0);
   const latestPersistedIndexRef = useRef<number>(document?.progress.chunkIndex ?? 0);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isPlayingRef = useRef<boolean>(false);
+  const lastTapTimeRef = useRef<number>(0);
+  const tapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  const bookmarks = useMemo(() => document?.progress.bookmarks ?? [], [document]);
+
+  const isLandscape = width > height;
+  const scaleFactor = isLandscape ? 0.7 : 1;
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   const bgStyle = useMemo(() => {
-    console.log('[Reader] Computing bgStyle:', {
-      theme: settings.backgroundTheme,
-      bgType: settings.background.type,
-      customBg: settings.customBackgroundColor,
-      gradientColors: settings.background.gradientColors,
-      patternColor: settings.background.patternColor,
-    });
-
     if (settings.backgroundTheme === 'custom' && settings.background.type === 'gradient') {
       const firstColor = settings.background.gradientColors[0] || '#000000';
       return {
@@ -78,8 +89,6 @@ export default function ReaderScreen() {
     return bgStyle.backgroundColor;
   }, [backgroundComponent, bgStyle.backgroundColor, settings.background.type, settings.customBackgroundColor]);
 
-
-
   const contrastWarning = useMemo(() => {
     if (settings.backgroundTheme === 'custom') {
       return !meetsContrastThreshold(settings.customBackgroundColor, bgStyle.textColor);
@@ -90,6 +99,12 @@ export default function ReaderScreen() {
   const triggerReaderFeedback = useCallback(() => {
     if (Platform.OS !== 'web') {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
+    }
+  }, []);
+
+  const triggerMediumFeedback = useCallback(() => {
+    if (Platform.OS !== 'web') {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => undefined);
     }
   }, []);
 
@@ -104,6 +119,15 @@ export default function ReaderScreen() {
     return null;
   }, [document]);
 
+  const initialChunkIndex = useMemo(() => {
+    const raw = params.initialChunkIndex as string | undefined;
+    if (raw !== undefined) {
+      const parsed = parseInt(raw, 10);
+      if (!isNaN(parsed) && parsed >= 0) return parsed;
+    }
+    return undefined;
+  }, [params.initialChunkIndex]);
+
   useEffect(() => {
     if (!document) {
       setIsPlaying(false);
@@ -111,8 +135,11 @@ export default function ReaderScreen() {
     }
     setMode(document.lastMode);
     if (document.isReadable) {
-      setCurrentChunkIndex(document.progress.chunkIndex);
-      pausedIndexRef.current = document.progress.chunkIndex;
+      const startIndex = initialChunkIndex !== undefined
+        ? Math.min(initialChunkIndex, Math.max(0, chunks.length - 1))
+        : document.progress.chunkIndex;
+      setCurrentChunkIndex(startIndex);
+      pausedIndexRef.current = startIndex;
     } else {
       setCurrentChunkIndex(0);
       pausedIndexRef.current = 0;
@@ -151,7 +178,6 @@ export default function ReaderScreen() {
     const targetIndex = pausedIndexRef.current + Math.floor(elapsed / (msPerWord * settings.chunkSize));
 
     if (targetIndex >= chunks.length) {
-      console.log('[Reader] Reached end of document');
       setIsPlaying(false);
       setCurrentChunkIndex(chunks.length - 1);
       void persistProgress(chunks.length - 1);
@@ -170,7 +196,6 @@ export default function ReaderScreen() {
 
   useEffect(() => {
     if (isPlaying) {
-      console.log('[Reader] Starting playback at chunk', pausedIndexRef.current, 'WPM', settings.wpm);
       startTimeRef.current = 0;
       rafIdRef.current = requestAnimationFrame(playbackLoop);
     } else {
@@ -197,13 +222,23 @@ export default function ReaderScreen() {
     return () => {
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
       if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+      if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
     };
   }, []);
 
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if ((nextState === 'background' || nextState === 'inactive') && isPlayingRef.current) {
+        setIsPlaying(false);
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
   const handlePlayPause = useCallback(() => {
-    triggerReaderFeedback();
+    triggerMediumFeedback();
     setIsPlaying(!isPlaying);
-  }, [isPlaying, triggerReaderFeedback]);
+  }, [isPlaying, triggerMediumFeedback]);
 
   const handleJump = useCallback((amount: number) => {
     triggerReaderFeedback();
@@ -212,6 +247,18 @@ export default function ReaderScreen() {
     pausedIndexRef.current = newIndex;
     void persistProgress(newIndex);
   }, [currentChunkIndex, chunks.length, persistProgress, triggerReaderFeedback]);
+
+  const handleSeekTo = useCallback((index: number) => {
+    const clamped = Math.max(0, Math.min(index, chunks.length - 1));
+    setCurrentChunkIndex(clamped);
+    pausedIndexRef.current = clamped;
+    void persistProgress(clamped);
+    if (isPlaying) {
+      stopPlayback();
+      startTimeRef.current = 0;
+      rafIdRef.current = requestAnimationFrame(playbackLoop);
+    }
+  }, [chunks.length, isPlaying, persistProgress, stopPlayback, playbackLoop]);
 
   const adjustWPM = useCallback((delta: number) => {
     triggerReaderFeedback();
@@ -225,8 +272,6 @@ export default function ReaderScreen() {
     updateSettings({ threeD: { ...settings.threeD, wordSpacing: newSpacing } });
   }, [settings.threeD, updateSettings, triggerReaderFeedback]);
 
-
-
   const toggleMode = useCallback(() => {
     triggerReaderFeedback();
     const newMode: ReadingMode = mode === '2D' ? '3D' : '2D';
@@ -236,15 +281,115 @@ export default function ReaderScreen() {
     }
   }, [mode, document, updateDocument, triggerReaderFeedback]);
 
-  const handleScreenPress = useCallback(() => {
-    setShowControls(prev => !prev);
+  const toggleBookmark = useCallback(async () => {
+    if (!document) return;
+    triggerMediumFeedback();
+    const currentBookmarks = [...bookmarks];
+    const idx = currentBookmarks.indexOf(currentChunkIndex);
+    if (idx === -1) {
+      currentBookmarks.push(currentChunkIndex);
+      currentBookmarks.sort((a, b) => a - b);
+    } else {
+      currentBookmarks.splice(idx, 1);
+    }
+    await updateDocument(document.id, {
+      progress: { ...document.progress, bookmarks: currentBookmarks },
+    });
+  }, [document, bookmarks, currentChunkIndex, updateDocument, triggerMediumFeedback]);
+
+  const isBookmarked = useMemo(() => bookmarks.includes(currentChunkIndex), [bookmarks, currentChunkIndex]);
+
+  const showControlsWithTimer = useCallback(() => {
+    setShowControls(true);
     if (controlsTimerRef.current) {
       clearTimeout(controlsTimerRef.current);
     }
     controlsTimerRef.current = setTimeout(() => {
-      if (isPlaying) setShowControls(false);
-    }, 3000);
-  }, [isPlaying]);
+      if (isPlayingRef.current) setShowControls(false);
+    }, 4000);
+  }, []);
+
+  const readerPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_, gs) => {
+      return Math.abs(gs.dx) > 5 || Math.abs(gs.dy) > 5;
+    },
+    onPanResponderGrant: (evt) => {
+      touchStartPosRef.current = { x: evt.nativeEvent.pageX, y: evt.nativeEvent.pageY };
+    },
+    onPanResponderRelease: (evt, gs) => {
+      const { dx, dy } = gs;
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+
+      if (absDx < TAP_THRESHOLD && absDy < TAP_THRESHOLD) {
+        const now = Date.now();
+        const timeSinceLastTap = now - lastTapTimeRef.current;
+
+        if (timeSinceLastTap < DOUBLE_TAP_DELAY) {
+          if (tapTimeoutRef.current) {
+            clearTimeout(tapTimeoutRef.current);
+            tapTimeoutRef.current = null;
+          }
+          handlePlayPause();
+          lastTapTimeRef.current = 0;
+          return;
+        }
+
+        lastTapTimeRef.current = now;
+        if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
+
+        tapTimeoutRef.current = setTimeout(() => {
+          setShowControls(prev => {
+            const next = !prev;
+            if (next) {
+              controlsTimerRef.current = setTimeout(() => {
+                if (isPlayingRef.current) setShowControls(false);
+              }, 4000);
+            } else if (controlsTimerRef.current) {
+              clearTimeout(controlsTimerRef.current);
+            }
+            return next;
+          });
+          tapTimeoutRef.current = null;
+        }, DOUBLE_TAP_DELAY);
+      } else if (absDx > absDy && absDx > SWIPE_THRESHOLD) {
+        triggerReaderFeedback();
+        const jump = dx > 0 ? -5 : 5;
+        handleJump(jump);
+      } else if (absDy > absDx && absDy > SWIPE_THRESHOLD) {
+        triggerMediumFeedback();
+        const delta = dy > 0 ? -50 : 50;
+        adjustWPM(delta);
+      }
+    },
+  }), [handlePlayPause, handleJump, adjustWPM, triggerReaderFeedback, triggerMediumFeedback]);
+
+  const progressPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (evt) => {
+      const progressBarWidth = width - (isLandscape ? 32 : 40) - 52;
+      const touchX = evt.nativeEvent.locationX;
+      const pct = Math.max(0, Math.min(1, (touchX - 8) / progressBarWidth));
+      const idx = Math.round(pct * (chunks.length - 1));
+      setDragChunkIndex(idx);
+      setIsDraggingProgress(true);
+      triggerReaderFeedback();
+    },
+    onPanResponderMove: (evt) => {
+      const progressBarWidth = width - (isLandscape ? 32 : 40) - 52;
+      const touchX = evt.nativeEvent.locationX;
+      const pct = Math.max(0, Math.min(1, (touchX - 8) / progressBarWidth));
+      const idx = Math.round(pct * (chunks.length - 1));
+      setDragChunkIndex(idx);
+    },
+    onPanResponderRelease: () => {
+      setIsDraggingProgress(false);
+      triggerMediumFeedback();
+      handleSeekTo(dragChunkIndex);
+    },
+  }), [chunks.length, width, isLandscape, dragChunkIndex, handleSeekTo, triggerReaderFeedback, triggerMediumFeedback]);
 
   if (!document) {
     return (
@@ -302,189 +447,265 @@ export default function ReaderScreen() {
   const currentChunk = chunks[Math.min(currentChunkIndex, chunks.length - 1)] || chunks[0];
   const progress = chunks.length > 0 ? (currentChunkIndex / chunks.length) * 100 : 0;
   const progressLabel = `${Math.round(progress)}%`;
-  const isLandscape = width > height;
-  const scaleFactor = isLandscape ? 0.7 : 1;
+  const displayIndex = isDraggingProgress ? dragChunkIndex : currentChunkIndex;
+  const dragProgress = chunks.length > 0 ? (dragChunkIndex / chunks.length) * 100 : 0;
 
   return (
-    <Pressable style={[styles.container, { backgroundColor: containerBgColor }]} onPress={handleScreenPress}>
+    <View style={[styles.container, { backgroundColor: containerBgColor }]}>
       {backgroundComponent}
-      {showControls && (
-        <View style={[styles.topBar, { paddingTop: insets.top }]}>
-          <Pressable onPress={() => router.back()} style={styles.backButton}>
-            <ArrowLeft size={24} color={bgStyle.textColor} />
-          </Pressable>
-          <View style={styles.readerHeaderMeta}>
-            <Text style={[styles.readerHeaderEyebrow, { color: bgStyle.textColor }]}>Now reading</Text>
-            <Text style={[styles.readerHeaderTitle, { color: bgStyle.textColor }]} numberOfLines={1}>{document.title}</Text>
-          </View>
-          <View style={styles.modeToggle}>
-            <Pressable
-              onPress={toggleMode}
-              style={[styles.modeButton, mode === '2D' && styles.modeButtonActive]}
-            >
-              <Eye size={18} color={mode === '2D' ? '#FFFFFF' : bgStyle.textColor} />
+
+      <View
+        style={styles.readerGestureArea}
+        {...readerPanResponder.panHandlers}
+      >
+        {showControls && (
+          <View style={[styles.topBar, { paddingTop: insets.top }]}>
+            <Pressable onPress={() => router.back()} style={styles.backButton}>
+              <ArrowLeft size={24} color={bgStyle.textColor} />
             </Pressable>
-            <Pressable
-              onPress={toggleMode}
-              style={[styles.modeButton, mode === '3D' && styles.modeButtonActive]}
-            >
-              <Glasses size={18} color={mode === '3D' ? '#FFFFFF' : bgStyle.textColor} />
-            </Pressable>
-          </View>
-        </View>
-      )}
-
-      <View style={[styles.readerArea, isLandscape && { paddingHorizontal: 16 }]}>
-        {mode === '2D' ? (
-          <View style={styles.textContainer}>
-            <View style={styles.focusHalo} />
-            <Text
-              style={[
-                styles.textDisplay,
-                {
-                  color: bgStyle.textColor,
-                  fontSize: settings.fontSize * scaleFactor,
-                  fontFamily: getFontFamily(settings.fontFamily),
-                }
-              ]}
-            >
-              {currentChunk.words.map((word, index) => {
-                const isORP = index === Math.floor(currentChunk.words.length / 2) && currentChunk.orpIndex < word.length;
-
-                if (isORP) {
-                  const orpPos = currentChunk.orpIndex;
-                  return (
-                    <Text key={index}>
-                      {word.substring(0, orpPos)}
-                      <Text style={styles.orpHighlight}>{word[orpPos]}</Text>
-                      {word.substring(orpPos + 1)}
-                      {index < currentChunk.words.length - 1 ? ' ' : ''}
-                    </Text>
-                  );
-                }
-
-                return <Text key={index}>{word}{index < currentChunk.words.length - 1 ? ' ' : ''}</Text>;
-              })}
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.stereoContainer}>
-            <View style={[styles.stereoEye, { marginRight: (settings.threeD.depth / 2) * scaleFactor }]}>
-              <Text
-                style={[
-                  styles.textDisplay,
-                  {
-                    color: bgStyle.textColor,
-                    fontSize: settings.fontSize * scaleFactor,
-                    fontFamily: getFontFamily(settings.fontFamily),
-                    opacity: settings.threeD.ghostAlpha,
-                  }
-                ]}
-              >
-                {currentChunk.words.map((word, idx) => (
-                  <Text key={idx}>
-                    {word}
-                    {idx < currentChunk.words.length - 1 ? ' '.repeat(Math.floor(settings.threeD.wordSpacing / 2) + 1) : ''}
-                  </Text>
-                ))}
-              </Text>
+            <View style={styles.readerHeaderMeta}>
+              <Text style={[styles.readerHeaderEyebrow, { color: bgStyle.textColor }]}>Now reading</Text>
+              <Text style={[styles.readerHeaderTitle, { color: bgStyle.textColor }]} numberOfLines={1}>{document.title}</Text>
             </View>
-            <View style={[styles.stereoEye, { marginLeft: (settings.threeD.depth / 2) * scaleFactor }]}>
-              <Text
-                style={[
-                  styles.textDisplay,
-                  {
-                    color: bgStyle.textColor,
-                    fontSize: settings.fontSize * scaleFactor,
-                    fontFamily: getFontFamily(settings.fontFamily),
-                  }
-                ]}
+            <View style={styles.modeToggle}>
+              <Pressable
+                onPress={toggleMode}
+                style={[styles.modeButton, mode === '2D' && styles.modeButtonActive]}
               >
-                {currentChunk.words.map((word, idx) => (
-                  <Text key={idx}>
-                    {word}
-                    {idx < currentChunk.words.length - 1 ? ' '.repeat(Math.floor(settings.threeD.wordSpacing / 2) + 1) : ''}
-                  </Text>
-                ))}
-              </Text>
+                <Eye size={18} color={mode === '2D' ? '#FFFFFF' : bgStyle.textColor} />
+              </Pressable>
+              <Pressable
+                onPress={toggleMode}
+                style={[styles.modeButton, mode === '3D' && styles.modeButtonActive]}
+              >
+                <Glasses size={18} color={mode === '3D' ? '#FFFFFF' : bgStyle.textColor} />
+              </Pressable>
             </View>
           </View>
         )}
-      </View>
 
-      {showControls && (
-        <View style={[styles.controls, { marginBottom: insets.bottom + (isLandscape ? 8 : 16), marginHorizontal: isLandscape ? 16 : 20 }]}>
-          {contrastWarning && (
-            <View style={styles.contrastWarning}>
-              <Text style={styles.contrastWarningText}>⚠️ Low contrast detected</Text>
+        <View style={[styles.readerArea, isLandscape && { paddingHorizontal: 16 }]}>
+          {mode === '2D' ? (
+            <View style={styles.textContainer}>
+              <View style={styles.focusHalo} />
+              <Text
+                style={[
+                  styles.textDisplay,
+                  {
+                    color: bgStyle.textColor,
+                    fontSize: settings.fontSize * scaleFactor,
+                    fontFamily: getFontFamily(settings.fontFamily),
+                  }
+                ]}
+              >
+                {currentChunk.words.map((word, index) => {
+                  const isORP = index === Math.floor(currentChunk.words.length / 2) && currentChunk.orpIndex < word.length;
+
+                  if (isORP) {
+                    const orpPos = currentChunk.orpIndex;
+                    return (
+                      <Text key={index}>
+                        {word.substring(0, orpPos)}
+                        <Text style={styles.orpHighlight}>{word[orpPos]}</Text>
+                        {word.substring(orpPos + 1)}
+                        {index < currentChunk.words.length - 1 ? ' ' : ''}
+                      </Text>
+                    );
+                  }
+
+                  return <Text key={index}>{word}{index < currentChunk.words.length - 1 ? ' ' : ''}</Text>;
+                })}
+              </Text>
             </View>
-          )}
-          <View style={styles.progressInfo}>
-            <View>
-              <Text style={styles.progressKicker}>Session progress</Text>
-              <Text style={styles.progressText}>{currentChunkIndex + 1} / {chunks.length} chunks</Text>
-            </View>
-            <View style={styles.speedPill}>
-              <Text style={styles.speedPillText}>{settings.wpm} WPM</Text>
-            </View>
-          </View>
-
-          <View style={styles.progressBarContainer}>
-            <View style={styles.progressBar}>
-              <View style={[styles.progressFill, { width: `${progress}%` }]} />
-            </View>
-            <Text style={styles.progressPercent}>{progressLabel}</Text>
-          </View>
-
-          <View style={styles.playbackControls}>
-            <Pressable onPress={() => handleJump(-10)} style={[styles.jumpButton, isLandscape && { width: 40, height: 40 }]}>
-              <Text style={[styles.jumpText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 15 }]}>-10</Text>
-            </Pressable>
-
-            <Pressable onPress={handlePlayPause} style={[styles.playButton, isLandscape && { width: 48, height: 48 }]}>
-              {isPlaying ? (
-                <Pause size={isLandscape ? 20 : 28} color="#FFFFFF" fill="#FFFFFF" />
-              ) : (
-                <Play size={isLandscape ? 20 : 28} color="#FFFFFF" fill="#FFFFFF" />
-              )}
-            </Pressable>
-
-            <Pressable onPress={() => handleJump(10)} style={[styles.jumpButton, isLandscape && { width: 40, height: 40 }]}>
-              <Text style={[styles.jumpText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 15 }]}>+10</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.settingsControls}>
-            <Pressable onPress={() => adjustWPM(-50)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
-              <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>-50</Text>
-            </Pressable>
-            <Pressable onPress={() => adjustWPM(50)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
-              <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>+50</Text>
-            </Pressable>
-          </View>
-
-          {mode === '3D' && (
-            <View style={styles.spacingControls}>
-              <Text style={[styles.spacingLabel, { color: bgStyle.textColor, fontSize: isLandscape ? 10 : 12 }]}>Word Spacing</Text>
-              <View style={styles.spacingButtons}>
-                <Pressable onPress={() => adjustWordSpacing(-5)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
-                  <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>-5</Text>
-                </Pressable>
-                <Text style={[styles.spacingValue, { color: bgStyle.textColor, fontSize: isLandscape ? 13 : 16 }]}>{settings.threeD.wordSpacing}</Text>
-                <Pressable onPress={() => adjustWordSpacing(5)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
-                  <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>+5</Text>
-                </Pressable>
+          ) : (
+            <View style={styles.stereoContainer}>
+              <View style={[styles.stereoEye, { marginRight: (settings.threeD.depth / 2) * scaleFactor }]}>
+                <Text
+                  style={[
+                    styles.textDisplay,
+                    {
+                      color: bgStyle.textColor,
+                      fontSize: settings.fontSize * scaleFactor,
+                      fontFamily: getFontFamily(settings.fontFamily),
+                      opacity: settings.threeD.ghostAlpha,
+                    }
+                  ]}
+                >
+                  {currentChunk.words.map((word, idx) => (
+                    <Text key={idx}>
+                      {word}
+                      {idx < currentChunk.words.length - 1 ? ' '.repeat(Math.floor(settings.threeD.wordSpacing / 2) + 1) : ''}
+                    </Text>
+                  ))}
+                </Text>
+              </View>
+              <View style={[styles.stereoEye, { marginLeft: (settings.threeD.depth / 2) * scaleFactor }]}>
+                <Text
+                  style={[
+                    styles.textDisplay,
+                    {
+                      color: bgStyle.textColor,
+                      fontSize: settings.fontSize * scaleFactor,
+                      fontFamily: getFontFamily(settings.fontFamily),
+                    }
+                  ]}
+                >
+                  {currentChunk.words.map((word, idx) => (
+                    <Text key={idx}>
+                      {word}
+                      {idx < currentChunk.words.length - 1 ? ' '.repeat(Math.floor(settings.threeD.wordSpacing / 2) + 1) : ''}
+                    </Text>
+                  ))}
+                </Text>
               </View>
             </View>
           )}
+
+          {!showControls && isPlaying && (
+            <View style={styles.minimalPlayIndicator}>
+              <View style={styles.minimalPlayDot} />
+            </View>
+          )}
         </View>
-      )}
-    </Pressable>
+
+        {!showControls && !isPlaying && (
+          <View style={styles.tapHintContainer}>
+            <Text style={[styles.tapHint, { color: bgStyle.textColor }]}>Tap anywhere to continue</Text>
+          </View>
+        )}
+
+        {showControls && (
+          <View style={[styles.controls, { marginBottom: insets.bottom + (isLandscape ? 8 : 16), marginHorizontal: isLandscape ? 16 : 20 }]}>
+            {contrastWarning && (
+              <View style={styles.contrastWarning}>
+                <Text style={styles.contrastWarningText}>Low contrast detected</Text>
+              </View>
+            )}
+
+            <View style={styles.progressInfo}>
+              <View>
+                <Text style={styles.progressKicker}>Session progress</Text>
+                <Text style={styles.progressText}>
+                  {isDraggingProgress ? dragChunkIndex + 1 : currentChunkIndex + 1} / {chunks.length} chunks
+                </Text>
+              </View>
+              <View style={styles.speedPill}>
+                <Text style={styles.speedPillText}>{settings.wpm} WPM</Text>
+              </View>
+            </View>
+
+            <View
+              style={[styles.progressBarContainer, isDraggingProgress && styles.progressBarContainerActive]}
+              {...progressPanResponder.panHandlers}
+            >
+              <View style={[styles.progressBar, isDraggingProgress && styles.progressBarActive]}>
+                <View style={[styles.progressFill, { width: `${isDraggingProgress ? dragProgress : progress}%` }]} />
+                {bookmarks.map((bkIdx) => {
+                  const bkPct = chunks.length > 1 ? (bkIdx / chunks.length) * 100 : 0;
+                  return (
+                    <View
+                      key={`bk-${bkIdx}`}
+                      style={[styles.bookmarkDot, { left: `${bkPct}%` }]}
+                    />
+                  );
+                })}
+                <View
+                  style={[
+                    styles.progressThumb,
+                    { left: `${isDraggingProgress ? dragProgress : progress}%` },
+                    isDraggingProgress && styles.progressThumbActive,
+                  ]}
+                />
+              </View>
+              <Text style={styles.progressPercent}>{isDraggingProgress ? `${Math.round(dragProgress)}%` : progressLabel}</Text>
+            </View>
+
+            <View style={styles.playbackControls}>
+              <Pressable onPress={() => handleJump(-10)} style={[styles.jumpButton, isLandscape && { width: 40, height: 40 }]}>
+                <Text style={[styles.jumpText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 15 }]}>-10</Text>
+              </Pressable>
+
+              <Pressable onPress={handlePlayPause} style={[styles.playButton, isLandscape && { width: 48, height: 48 }]}>
+                {isPlaying ? (
+                  <Pause size={isLandscape ? 20 : 28} color="#FFFFFF" fill="#FFFFFF" />
+                ) : (
+                  <Play size={isLandscape ? 20 : 28} color="#FFFFFF" fill="#FFFFFF" />
+                )}
+              </Pressable>
+
+              <Pressable onPress={() => handleJump(10)} style={[styles.jumpButton, isLandscape && { width: 40, height: 40 }]}>
+                <Text style={[styles.jumpText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 15 }]}>+10</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.secondaryControls}>
+              <Pressable onPress={toggleBookmark} style={[styles.bookmarkButton, isBookmarked && styles.bookmarkButtonActive]}>
+                {isBookmarked ? (
+                  <BookmarkCheck size={18} color={appTheme.colors.cyan} />
+                ) : (
+                  <Bookmark size={18} color={bgStyle.textColor} />
+                )}
+              </Pressable>
+
+              <View style={styles.wpmControls}>
+                <Pressable onPress={() => adjustWPM(-50)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
+                  <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>-50</Text>
+                </Pressable>
+                <Pressable onPress={() => adjustWPM(50)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
+                  <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>+50</Text>
+                </Pressable>
+              </View>
+            </View>
+
+            {bookmarks.length > 0 && (
+              <View style={styles.bookmarkChips}>
+                {bookmarks.slice(0, 4).map((bkIdx) => (
+                  <Pressable
+                    key={`chip-${bkIdx}`}
+                    onPress={() => {
+                      triggerReaderFeedback();
+                      handleSeekTo(bkIdx);
+                    }}
+                    style={styles.bookmarkChip}
+                  >
+                    <Bookmark size={10} color={appTheme.colors.cyan} />
+                    <Text style={styles.bookmarkChipText}>Chunk {bkIdx + 1}</Text>
+                  </Pressable>
+                ))}
+                {bookmarks.length > 4 && (
+                  <View style={styles.bookmarkChip}>
+                    <Text style={styles.bookmarkChipText}>+{bookmarks.length - 4} more</Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {mode === '3D' && (
+              <View style={styles.spacingControls}>
+                <Text style={[styles.spacingLabel, { color: bgStyle.textColor, fontSize: isLandscape ? 10 : 12 }]}>Word Spacing</Text>
+                <View style={styles.spacingButtons}>
+                  <Pressable onPress={() => adjustWordSpacing(-5)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
+                    <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>-5</Text>
+                  </Pressable>
+                  <Text style={[styles.spacingValue, { color: bgStyle.textColor, fontSize: isLandscape ? 13 : 16 }]}>{settings.threeD.wordSpacing}</Text>
+                  <Pressable onPress={() => adjustWordSpacing(5)} style={[styles.adjButton, isLandscape && { paddingHorizontal: 16, paddingVertical: 8 }]}>
+                    <Text style={[styles.adjText, { color: bgStyle.textColor, fontSize: isLandscape ? 12 : 14 }]}>+5</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
+  },
+  readerGestureArea: {
     flex: 1,
   },
   topBar: {
@@ -612,6 +833,36 @@ const styles = StyleSheet.create({
     fontWeight: '800' as const,
     textDecorationLine: 'underline',
   },
+  minimalPlayIndicator: {
+    position: 'absolute',
+    bottom: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  minimalPlayDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: appTheme.colors.cyan,
+    opacity: 0.6,
+    shadowColor: appTheme.colors.cyan,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+  },
+  tapHintContainer: {
+    position: 'absolute',
+    bottom: 80,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  tapHint: {
+    fontSize: 13,
+    fontWeight: '600' as const,
+    opacity: 0.5,
+    letterSpacing: 0.3,
+  },
   controls: {
     gap: 14,
     padding: 16,
@@ -656,18 +907,62 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    paddingVertical: 8,
+    marginVertical: -4,
+  },
+  progressBarContainerActive: {
+    paddingVertical: 6,
   },
   progressBar: {
     flex: 1,
     height: 7,
     borderRadius: 999,
     backgroundColor: 'rgba(255, 255, 255, 0.13)',
-    overflow: 'hidden',
+    overflow: 'visible',
+    justifyContent: 'center',
+  },
+  progressBarActive: {
+    height: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
   },
   progressFill: {
     height: '100%',
     backgroundColor: appTheme.colors.cyan,
     borderRadius: 999,
+  },
+  bookmarkDot: {
+    position: 'absolute',
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: appTheme.colors.amber,
+    top: '50%',
+    marginTop: -2.5,
+    marginLeft: -2.5,
+  },
+  progressThumb: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#FFFFFF',
+    top: '50%',
+    marginTop: -7,
+    marginLeft: -7,
+    borderWidth: 2,
+    borderColor: appTheme.colors.cyan,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  progressThumbActive: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginTop: -10,
+    marginLeft: -10,
   },
   progressPercent: {
     width: 42,
@@ -709,10 +1004,29 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700' as const,
   },
-  settingsControls: {
+  secondaryControls: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'center',
-    gap: 16,
+    gap: 12,
+  },
+  bookmarkButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  bookmarkButtonActive: {
+    backgroundColor: 'rgba(94, 234, 212, 0.16)',
+    borderColor: 'rgba(94, 234, 212, 0.32)',
+  },
+  wpmControls: {
+    flexDirection: 'row',
+    gap: 10,
   },
   adjButton: {
     paddingHorizontal: 24,
@@ -725,6 +1039,29 @@ const styles = StyleSheet.create({
   adjText: {
     fontSize: 14,
     fontWeight: '600' as const,
+  },
+  bookmarkChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    justifyContent: 'center',
+    paddingTop: 2,
+  },
+  bookmarkChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(94, 234, 212, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(94, 234, 212, 0.18)',
+  },
+  bookmarkChipText: {
+    fontSize: 11,
+    fontWeight: '700' as const,
+    color: appTheme.colors.cyan,
   },
   contrastWarning: {
     paddingVertical: 8,

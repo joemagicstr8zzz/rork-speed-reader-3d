@@ -164,6 +164,10 @@ export const [DocumentProvider, useDocuments] = createContextHook(() => {
     loadDocuments();
   }, [loadDocuments]);
 
+    const refreshDocuments = useCallback(async () => {
+    await loadDocuments();
+  }, [loadDocuments]);
+
   return useMemo(() => ({
     documents,
     isLoading,
@@ -171,5 +175,6 @@ export const [DocumentProvider, useDocuments] = createContextHook(() => {
     updateDocument,
     deleteDocument,
     restoreSampleDocument,
-  }), [documents, isLoading, addDocument, updateDocument, deleteDocument, restoreSampleDocument]);
+    refreshDocuments,
+  }), [documents, isLoading, addDocument, updateDocument, deleteDocument, restoreSampleDocument, refreshDocuments]);
 });
